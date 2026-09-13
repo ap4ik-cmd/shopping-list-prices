@@ -1,0 +1,24 @@
+name: Weekly price refresh
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # every Monday 06:00 UTC
+  workflow_dispatch: {}    # lets you also run it manually from the Actions tab
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install dependencies
+        working-directory: scripts
+        run: npm install
+      - name: Install Chromium
+        working-directory: scripts
+        run: npx playwright install --with-deps chromium
+      - name: Refresh all prices
+        working-directory: scripts
+        run: node check-prices.mjs --all
