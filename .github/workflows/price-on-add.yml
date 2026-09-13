@@ -1,0 +1,23 @@
+name: Check price for new item
+
+on:
+  repository_dispatch:
+    types: [check-price]
+
+jobs:
+  check-price:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install dependencies
+        working-directory: scripts
+        run: npm install
+      - name: Install Chromium
+        working-directory: scripts
+        run: npx playwright install --with-deps chromium
+      - name: Check price
+        working-directory: scripts
+        run: node check-prices.mjs --item "${{ github.event.client_payload.itemName }}"
