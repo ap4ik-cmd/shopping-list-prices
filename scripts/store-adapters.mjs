@@ -7,9 +7,10 @@
 // come back with a per-kg price from the store itself, which is fine —
 // that IS the real unit price for that product.
 //
-// Магнит is verified against real markup (as of the HTML sample checked
-// with the user). Пятёрочка is left as a stub — its anti-bot protection
-// needs a specialised browser (camoufox), not plain Playwright.
+// Магнит and Командор are verified against real markup (checked with
+// the user directly). Пятёрочка is left as a stub — its anti-bot
+// protection needs a specialised browser (camoufox), not plain
+// Playwright.
 
 async function searchMagnit(page, query, limit = 5) {
   const url = `https://magnit.ru/search?term=${encodeURIComponent(query)}`;
@@ -45,6 +46,47 @@ async function searchMagnit(page, query, limit = 5) {
   return items.slice(0, limit);
 }
 
+// Командор (kopilkago.ru) doesn't navigate to a separate search-results
+// URL — results appear as a dropdown under the search field while
+// typing. So instead of goto()-ing a search URL, we type into the
+// field on the homepage and read whatever appears.
+async function searchKomandor(page, query, limit = 5) {
+  await page.goto('https://kopilkago.ru/', { waitUntil: 'domcontentloaded', timeout: 20000 });
+
+  const input = await page.waitForSelector('.header-search__input', { timeout: 10000 }).catch(() => null);
+  if (!input) return [];
+
+  await input.click();
+  await input.fill(query);
+  // If .fill() ever stops triggering the site's search (some sites need
+  // real keystrokes, not a programmatic value set), swap the line above
+  // for: await input.pressSequentially(query, { delay: 60 });
+
+  await page.waitForSelector('.product-card__content', { timeout: 8000 }).catch(() => {});
+  await page.waitForTimeout(500); // let async suggestions finish settling
+
+  const items = await page.evaluate(() => {
+    const cards = Array.from(document.querySelectorAll('.product-card__content'));
+    return cards
+      .map(card => {
+        const nameEl = card.querySelector('.product-card__name');
+        // ".../__current" is the pack price as shown (e.g. "80.00" for
+        // a 0.5кг pack). Deliberately NOT using the "quantum" weight
+        // reference price next to it — that one is per-kg, not the
+        // pack price.
+        const priceEl = card.querySelector('.product-card-price__current');
+        const title = nameEl ? nameEl.textContent.trim() : '';
+        const priceText = priceEl ? priceEl.textContent.replace(/\s/g, '').replace(',', '.') : '';
+        const match = priceText.match(/[\d.]+/);
+        const price = match ? parseFloat(match[0]) : NaN;
+        return { title, price };
+      })
+      .filter(x => x.title && !Number.isNaN(x.price));
+  });
+
+  return items.slice(0, limit);
+}
+
 // TODO: needs real selectors — Пятёрочка's anti-bot protection needs a
 // specialised browser (camoufox), not plain Playwright. Left as a stub.
 async function searchPyaterochka(_page, _query, _limit = 5) {
@@ -52,6 +94,8 @@ async function searchPyaterochka(_page, _query, _limit = 5) {
 }
 
 export const STORE_ADAPTERS = [
-  { name: 'Магнит', search: searchMagnit },
-  { name: 'Пятёрочка', search: searchPyaterochka },
+  { name: 'Командор', search: searchKomandor },
 ];
+// Магнит и Пятёрочка временно отключены (не участвуют в поиске), но
+// функции остались выше — верни нужную сеть в этот список, если
+// захочешь снова её подключить.
