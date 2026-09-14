@@ -7,31 +7,32 @@
 // come back with a per-kg price from the store itself, which is fine —
 // that IS the real unit price for that product.
 //
-// HONEST CAVEAT: this was written without live internet access, so the
-// selectors below are a best-effort starting point, not verified against
-// the real current markup. Пятёрочка and Магнит are left as stubs on
-// purpose rather than guessed — their sites are more aggressively
-// protected and guessing selectors would just produce silently-wrong
-// code. To finish an adapter:
-//   1. Open the store's search page in a real browser.
-//   2. DevTools → inspect a product card → note the class names/attributes
-//      around the title and the price.
-//   3. Fill in the matching adapter below (or send me the HTML/selectors
-//      and I'll do it with you).
+// Магнит is verified against real markup (as of the HTML sample checked
+// with the user). Пятёрочка is left as a stub — its anti-bot protection
+// needs a specialised browser (camoufox), not plain Playwright.
 
-async function searchPerekrestok(page, query, limit = 5) {
-  const url = `https://www.perekrestok.ru/cat/search?text=${encodeURIComponent(query)}`;
+async function searchMagnit(page, query, limit = 5) {
+  const url = `https://magnit.ru/search?term=${encodeURIComponent(query)}`;
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+
+  // Magnit may show an address/city picker on first visit — try to
+  // dismiss it if it's blocking the results (best-effort, harmless if
+  // there's nothing to dismiss).
+  await page.keyboard.press('Escape').catch(() => {});
+
   await page
-    .waitForSelector('[data-qa*="product"], [class*="product-card"]', { timeout: 8000 })
+    .waitForSelector('.unit-catalog-product-preview-description', { timeout: 12000 })
     .catch(() => {});
 
   const items = await page.evaluate(() => {
-    const cards = Array.from(document.querySelectorAll('[data-qa*="product"], [class*="product-card"]'));
+    const cards = Array.from(document.querySelectorAll('.unit-catalog-product-preview-description'));
     return cards
       .map(card => {
-        const titleEl = card.querySelector('[class*="title"], [class*="name"]');
-        const priceEl = card.querySelector('[class*="price"]:not([class*="old"])');
+        const titleEl = card.querySelector('.unit-catalog-product-preview-title');
+        // ".../__regular" is the pack price as shown (e.g. "223.98 ₽").
+        // Deliberately NOT using ".../-weighted" — that one is the
+        // per-kg reference price (e.g. "159.99 ₽ · 1кг"), not the pack price.
+        const priceEl = card.querySelector('.unit-catalog-product-preview-prices__regular');
         const title = titleEl ? titleEl.textContent.trim() : '';
         const priceText = priceEl ? priceEl.textContent.replace(/\s/g, '').replace(',', '.') : '';
         const match = priceText.match(/[\d.]+/);
@@ -44,18 +45,13 @@ async function searchPerekrestok(page, query, limit = 5) {
   return items.slice(0, limit);
 }
 
-// TODO: needs real selectors — left as a stub, see caveat above.
+// TODO: needs real selectors — Пятёрочка's anti-bot protection needs a
+// specialised browser (camoufox), not plain Playwright. Left as a stub.
 async function searchPyaterochka(_page, _query, _limit = 5) {
   return [];
 }
 
-// TODO: needs real selectors — left as a stub, see caveat above.
-async function searchMagnit(_page, _query, _limit = 5) {
-  return [];
-}
-
 export const STORE_ADAPTERS = [
-  { name: 'Перекрёсток', search: searchPerekrestok },
-  { name: 'Пятёрочка', search: searchPyaterochka },
   { name: 'Магнит', search: searchMagnit },
+  { name: 'Пятёрочка', search: searchPyaterochka },
 ];
