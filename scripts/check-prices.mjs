@@ -56,7 +56,17 @@ async function collectAllItemNames() {
       );
     }
   }
-  return Array.from(names);
+
+  // Не проверяем товары, у которых задана фиксированная цена в настройках.
+  let fixedKeys = new Set();
+  try {
+    const fixed = await fetchJSON(`${FIREBASE_URL}/fixedPrices.json`);
+    if (fixed) fixedKeys = new Set(Object.keys(fixed));
+  } catch (e) {
+    // если не удалось получить — просто не фильтруем
+  }
+
+  return Array.from(names).filter(name => !fixedKeys.has(priceKey(name)));
 }
 
 async function priceForItem(browser, name) {
