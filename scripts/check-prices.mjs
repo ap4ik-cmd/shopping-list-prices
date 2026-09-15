@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 // check-prices.mjs
 //
-// Two modes:
-//   --item "Молоко"   → check price for exactly one product (used by the
-//                        "add item" trigger)
-//   --all             → read the whole board, collect every unique product
-//                        name, refresh all of them (used by the weekly
-//                        scheduled workflow)
+// Three modes:
+//   --item "Молоко"     → check price for exactly one product (used by the
+//                          "add item" trigger)
+//   --sheet <sheetId>   → refresh only products on one specific sheet
+//                          (used by the manual "recalculate all" button,
+//                          scoped to whichever sheet the user is on)
+//   --all               → read the whole board, every sheet, every unique
+//                          product name (used by the weekly scheduled workflow)
 //
 // Writes results to Firebase Realtime Database at /prices/<key>.json,
 // using the same public REST endpoint the app itself already uses.
@@ -33,6 +35,8 @@ function parseArgs() {
   const args = process.argv.slice(2);
   const itemIdx = args.indexOf('--item');
   if (itemIdx !== -1) return { mode: 'single', item: args[itemIdx + 1] };
+  const sheetIdx = args.indexOf('--sheet');
+  if (sheetIdx !== -1) return { mode: 'sheet', sheetId: args[sheetIdx + 1] };
   return { mode: 'all' };
 }
 
@@ -42,12 +46,17 @@ async function fetchJSON(url) {
   return res.json();
 }
 
-async function collectAllItemNames() {
+async function collectItemNames(sheetId) {
   const board = await fetchJSON(BOARD_PATH);
   const names = new Set();
   if (board && board.sheets) {
-    for (const sheetId of Object.keys(board.sheets)) {
-      const sheet = board.sheets[sheetId];
+    const sheetIds = sheetId ? [sheetId] : Object.keys(board.sheets);
+    for (const id of sheetIds) {
+      const sheet = board.sheets[id];
+      if (!sheet) {
+        console.warn(`Sheet "${id}" not found in board — skipping`);
+        continue;
+      }
       (sheet.categories || []).forEach(cat =>
         (cat.items || []).forEach(it => it.name && names.add(it.name))
       );
@@ -111,11 +120,17 @@ async function writePrice(key, data) {
 }
 
 async function main() {
-  const { mode, item } = parseArgs();
+  const { mode, item, sheetId } = parseArgs();
   if (mode === 'single' && !item) {
     throw new Error('--item requires a value');
   }
-  const names = mode === 'single' ? [item] : await collectAllItemNames();
+  if (mode === 'sheet' && !sheetId) {
+    throw new Error('--sheet requires a value');
+  }
+  let names;
+  if (mode === 'single') names = [item];
+  else if (mode === 'sheet') names = await collectItemNames(sheetId);
+  else names = await collectItemNames(null);
   console.log(`Checking prices for ${names.length} item(s)...`);
 
   const browser = await chromium.launch();
