@@ -1,11 +1,19 @@
 // Triggers the "Weekly price refresh" GitHub Action on demand, so the
-// user can recalculate prices for every product already in the list
-// without waiting for the Monday schedule. Uses the same GITHUB_TOKEN /
-// GITHUB_REPO env vars as trigger-price-check.js.
+// user can recalculate prices for products on the sheet they're
+// currently viewing, without waiting for the Monday schedule. Uses the
+// same GITHUB_TOKEN / GITHUB_REPO env vars as trigger-price-check.js.
 
 export default async (req, context) => {
   if (req.method !== 'POST') {
     return new Response('Method not allowed', { status: 405 });
+  }
+
+  let sheetId = 'all';
+  try {
+    const body = await req.json();
+    if (body && body.sheetId) sheetId = body.sheetId;
+  } catch {
+    // тело необязательно — без него просто пересчитаем всё
   }
 
   const token = Netlify.env.get('GITHUB_TOKEN');
@@ -24,7 +32,7 @@ export default async (req, context) => {
         Accept: 'application/vnd.github+json',
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ ref: 'main' }),
+      body: JSON.stringify({ ref: 'main', inputs: { sheetId: String(sheetId) } }),
     }
   );
 
