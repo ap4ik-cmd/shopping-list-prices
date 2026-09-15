@@ -2,8 +2,13 @@ name: Weekly price refresh
 
 on:
   schedule:
-    - cron: '0 6 * * 1'   # every Monday 06:00 UTC
-  workflow_dispatch: {}    # lets you also run it manually from the Actions tab
+    - cron: '0 6 * * 1'   # every Monday 06:00 UTC — всегда пересчитывает всё
+  workflow_dispatch:
+    inputs:
+      sheetId:
+        description: 'ID листа для пересчёта (пусто/all — все листы)'
+        required: false
+        default: 'all'
 
 jobs:
   refresh:
@@ -19,6 +24,11 @@ jobs:
       - name: Install Chromium
         working-directory: scripts
         run: npx playwright install --with-deps chromium
-      - name: Refresh all prices
+      - name: Refresh prices
         working-directory: scripts
-        run: node check-prices.mjs --all
+        run: |
+          if [ -n "${{ github.event.inputs.sheetId }}" ] && [ "${{ github.event.inputs.sheetId }}" != "all" ]; then
+            node check-prices.mjs --sheet "${{ github.event.inputs.sheetId }}"
+          else
+            node check-prices.mjs --all
+          fi
