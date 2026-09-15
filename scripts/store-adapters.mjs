@@ -58,7 +58,7 @@ async function searchKomandor(page, query, limit = 5) {
 
   await input.click();
   await input.fill(''); // на случай, если в поле уже что-то было
-  await input.pressSequentially(query, { delay: 60 });
+  await input.type(query, { delay: 60 });
 
   // Ждём именно ПОЯВЛЕНИЯ карточек ПОСЛЕ ввода, а не просто их наличия —
   // на странице могут быть похожие блоки до всякого поиска (например,
