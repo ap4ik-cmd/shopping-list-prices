@@ -57,15 +57,14 @@ async function searchKomandor(page, query, limit = 5) {
   if (!input) return [];
 
   await input.click();
-  await input.fill(''); // на случай, если в поле уже что-то было
-  await input.type(query, { delay: 60 });
+  await input.type(query, { delay: 90 });
 
-  // Ждём именно ПОЯВЛЕНИЯ карточек ПОСЛЕ ввода, а не просто их наличия —
-  // на странице могут быть похожие блоки до всякого поиска (например,
-  // блок рекомендаций), поэтому дополнительная пауза после печати важна.
-  await page.waitForTimeout(700);
+  // Сайт ищет с debounce + сетевым запросом — ждём подольше, а не просто
+  // «появления карточек» (они могут быть уже на странице до поиска, из
+  // блока с популярными/рекомендованными товарами).
+  await page.waitForTimeout(1500);
   await page.waitForSelector('.product-card__content', { timeout: 8000 }).catch(() => {});
-  await page.waitForTimeout(500); // дать подгрузиться асинхронным подсказкам
+  await page.waitForTimeout(500);
 
   const items = await page.evaluate(() => {
     const cards = Array.from(document.querySelectorAll('.product-card__content'));
@@ -85,6 +84,9 @@ async function searchKomandor(page, query, limit = 5) {
       })
       .filter(x => x.title && !Number.isNaN(x.price));
   });
+
+  // Диагностика в лог Action — видно, что реально вернул поиск по запросу.
+  console.log(`  [Командор] запрос "${query}" → найдено ${items.length}: ${items.slice(0, 5).map(i => i.title).join(' | ')}`);
 
   return items.slice(0, limit);
 }
