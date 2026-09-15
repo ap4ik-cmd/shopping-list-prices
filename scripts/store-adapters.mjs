@@ -57,13 +57,15 @@ async function searchKomandor(page, query, limit = 5) {
   if (!input) return [];
 
   await input.click();
-  await input.fill(query);
-  // If .fill() ever stops triggering the site's search (some sites need
-  // real keystrokes, not a programmatic value set), swap the line above
-  // for: await input.pressSequentially(query, { delay: 60 });
+  await input.fill(''); // на случай, если в поле уже что-то было
+  await input.pressSequentially(query, { delay: 60 });
 
+  // Ждём именно ПОЯВЛЕНИЯ карточек ПОСЛЕ ввода, а не просто их наличия —
+  // на странице могут быть похожие блоки до всякого поиска (например,
+  // блок рекомендаций), поэтому дополнительная пауза после печати важна.
+  await page.waitForTimeout(700);
   await page.waitForSelector('.product-card__content', { timeout: 8000 }).catch(() => {});
-  await page.waitForTimeout(500); // let async suggestions finish settling
+  await page.waitForTimeout(500); // дать подгрузиться асинхронным подсказкам
 
   const items = await page.evaluate(() => {
     const cards = Array.from(document.querySelectorAll('.product-card__content'));
