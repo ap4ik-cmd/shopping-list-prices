@@ -64,14 +64,19 @@ async function searchKomandor(page, query, limit = 5) {
   const submitBtn = await page.waitForSelector('.header-search__submit', { timeout: 5000 }).catch(() => null);
   if (submitBtn) await submitBtn.click();
 
-  // Ждём, пока сработает индикатор загрузки и подгрузятся результаты.
+  // Ждём, пока сработает индикатор загрузки и появится сама панель
+  // результатов (не просто любую карточку товара — они есть и в общем
+  // каталоге на странице, а нам нужны именно результаты поиска).
   await page.waitForSelector('.header-search__loader', { state: 'visible', timeout: 3000 }).catch(() => {});
   await page.waitForSelector('.header-search__loader', { state: 'hidden', timeout: 8000 }).catch(() => {});
-  await page.waitForSelector('.product-card__content', { timeout: 8000 }).catch(() => {});
+  await page.waitForSelector('.header-search-result-products__list', { timeout: 8000 }).catch(() => {});
   await page.waitForTimeout(400);
 
   const items = await page.evaluate(() => {
-    const cards = Array.from(document.querySelectorAll('.product-card__content'));
+    // Строго внутри панели результатов поиска, а не по всей странице —
+    // иначе попадают карточки из обычного каталога на главной.
+    const scope = document.querySelector('.header-search-result-products__list') || document;
+    const cards = Array.from(scope.querySelectorAll('.product-card__content'));
     return cards
       .map(card => {
         const nameEl = card.querySelector('.product-card__name');
