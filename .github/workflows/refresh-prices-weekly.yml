@@ -27,8 +27,15 @@ jobs:
       - name: Refresh prices
         working-directory: scripts
         run: |
+          set -x
+          echo "DEBUG: node version:"
+          node --version
+          echo "DEBUG: files in this directory:"
+          ls -la
+          echo "DEBUG: sheetId input = [${{ github.event.inputs.sheetId }}]"
           if [ -n "${{ github.event.inputs.sheetId }}" ] && [ "${{ github.event.inputs.sheetId }}" != "all" ]; then
             node check-prices.mjs --sheet "${{ github.event.inputs.sheetId }}"
           else
             node check-prices.mjs --all
           fi
+          echo "DEBUG: node exit code was $?"
