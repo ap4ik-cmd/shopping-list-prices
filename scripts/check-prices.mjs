@@ -1,105 +1,153 @@
-// store-adapters.mjs
+#!/usr/bin/env node
+// check-prices.mjs
 //
-// Each adapter searches one store's site for a product name and returns
-// up to `limit` matches as { title, price }. `price` must be the PACK /
-// UNIT price shown on the site — not recalculated per kg. Items that are
-// genuinely sold loose by weight (fruit, veg, some meat) will naturally
-// come back with a per-kg price from the store itself, which is fine —
-// that IS the real unit price for that product.
+// Three modes:
+//   --item "Молоко"     → check price for exactly one product (used by the
+//                          "add item" trigger)
+//   --sheet <sheetId>   → refresh only products on one specific sheet
+//                          (used by the manual "recalculate all" button,
+//                          scoped to whichever sheet the user is on)
+//   --all               → read the whole board, every sheet, every unique
+//                          product name (used by the weekly scheduled workflow)
 //
-// Магнит and Командор are verified against real markup (checked with
-// the user directly). Пятёрочка is left as a stub — its anti-bot
-// protection needs a specialised browser (camoufox), not plain
-// Playwright.
+// Writes results to Firebase Realtime Database at /prices/<key>.json,
+// using the same public REST endpoint the app itself already uses.
 
-async function searchMagnit(page, query, limit = 5) {
-  const url = `https://magnit.ru/search?term=${encodeURIComponent(query)}`;
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+import { chromium } from 'playwright';
+import { STORE_ADAPTERS } from './store-adapters.mjs';
 
-  // Magnit may show an address/city picker on first visit — try to
-  // dismiss it if it's blocking the results (best-effort, harmless if
-  // there's nothing to dismiss).
-  await page.keyboard.press('Escape').catch(() => {});
+const FIREBASE_URL =
+  process.env.FIREBASE_URL ||
+  'https://foodlisting1-default-rtdb.asia-southeast1.firebasedatabase.app';
+const BOARD_PATH = `${FIREBASE_URL}/board.json`;
 
-  await page
-    .waitForSelector('.unit-catalog-product-preview-description', { timeout: 12000 })
-    .catch(() => {});
+// Must match the priceKey() function added to the frontend — see
+// PATCH-INSTRUCTIONS.md. Firebase keys can't contain . # $ [ ] /
+function priceKey(name) {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[.#$[\]/]/g, '_')
+    .replace(/\s+/g, '_');
+}
 
-  const items = await page.evaluate(() => {
-    const cards = Array.from(document.querySelectorAll('.unit-catalog-product-preview-description'));
-    return cards
-      .map(card => {
-        const titleEl = card.querySelector('.unit-catalog-product-preview-title');
-        // ".../__regular" is the pack price as shown (e.g. "223.98 ₽").
-        // Deliberately NOT using ".../-weighted" — that one is the
-        // per-kg reference price (e.g. "159.99 ₽ · 1кг"), not the pack price.
-        const priceEl = card.querySelector('.unit-catalog-product-preview-prices__regular');
-        const title = titleEl ? titleEl.textContent.trim() : '';
-        const priceText = priceEl ? priceEl.textContent.replace(/\s/g, '').replace(',', '.') : '';
-        const match = priceText.match(/[\d.]+/);
-        const price = match ? parseFloat(match[0]) : NaN;
-        return { title, price };
-      })
-      .filter(x => x.title && !Number.isNaN(x.price));
+function parseArgs() {
+  const args = process.argv.slice(2);
+  const itemIdx = args.indexOf('--item');
+  if (itemIdx !== -1) return { mode: 'single', item: args[itemIdx + 1] };
+  const sheetIdx = args.indexOf('--sheet');
+  if (sheetIdx !== -1) return { mode: 'sheet', sheetId: args[sheetIdx + 1] };
+  return { mode: 'all' };
+}
+
+async function fetchJSON(url) {
+  const res = await fetch(url, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`GET ${url} -> ${res.status}`);
+  return res.json();
+}
+
+async function collectItemNames(sheetId) {
+  const board = await fetchJSON(BOARD_PATH);
+  const names = new Set();
+  if (board && board.sheets) {
+    const sheetIds = sheetId ? [sheetId] : Object.keys(board.sheets);
+    for (const id of sheetIds) {
+      const sheet = board.sheets[id];
+      if (!sheet) {
+        console.warn(`Sheet "${id}" not found in board — skipping`);
+        continue;
+      }
+      (sheet.categories || []).forEach(cat =>
+        (cat.items || []).forEach(it => it.name && names.add(it.name))
+      );
+      ((sheet.misc && sheet.misc.items) || []).forEach(
+        it => it.name && names.add(it.name)
+      );
+    }
+  }
+
+  // Не проверяем товары, у которых задана фиксированная цена в настройках.
+  let fixedKeys = new Set();
+  try {
+    const fixed = await fetchJSON(`${FIREBASE_URL}/fixedPrices.json`);
+    if (fixed) fixedKeys = new Set(Object.keys(fixed));
+  } catch (e) {
+    // если не удалось получить — просто не фильтруем
+  }
+
+  return Array.from(names).filter(name => !fixedKeys.has(priceKey(name)));
+}
+
+async function priceForItem(browser, name) {
+  const page = await browser.newPage();
+  const allPrices = [];
+  const sources = [];
+
+  for (const adapter of STORE_ADAPTERS) {
+    try {
+      const results = await adapter.search(page, name, 5);
+      if (results.length) {
+        allPrices.push(...results.map(r => r.price));
+        sources.push(adapter.name);
+      }
+    } catch (e) {
+      console.warn(`[${adapter.name}] failed for "${name}": ${e.message}`);
+    }
+  }
+  await page.close();
+
+  if (!allPrices.length) {
+    console.warn(`No prices found anywhere for "${name}"`);
+    return null;
+  }
+
+  const avg = allPrices.reduce((a, b) => a + b, 0) / allPrices.length;
+  return {
+    avgPrice: Math.round(avg * 100) / 100,
+    sampleSize: allPrices.length,
+    sources,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+async function writePrice(key, data) {
+  const res = await fetch(`${FIREBASE_URL}/prices/${key}.json`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
   });
-
-  return items.slice(0, limit);
+  if (!res.ok) throw new Error(`PUT prices/${key} -> ${res.status}`);
 }
 
-// Командор (kopilkago.ru) doesn't navigate to a separate search-results
-// URL — results appear as a dropdown under the search field while
-// typing. So instead of goto()-ing a search URL, we type into the
-// field on the homepage and read whatever appears.
-async function searchKomandor(page, query, limit = 5) {
-  await page.goto('https://kopilkago.ru/', { waitUntil: 'domcontentloaded', timeout: 20000 });
+async function main() {
+  const { mode, item, sheetId } = parseArgs();
+  if (mode === 'single' && !item) {
+    throw new Error('--item requires a value');
+  }
+  if (mode === 'sheet' && !sheetId) {
+    throw new Error('--sheet requires a value');
+  }
+  let names;
+  if (mode === 'single') names = [item];
+  else if (mode === 'sheet') names = await collectItemNames(sheetId);
+  else names = await collectItemNames(null);
+  console.log(`Checking prices for ${names.length} item(s)...`);
 
-  const input = await page.waitForSelector('.header-search__input', { timeout: 10000 }).catch(() => null);
-  if (!input) return [];
-
-  await input.click();
-  await input.type(query, { delay: 90 });
-
-  // Сайт ищет с debounce + сетевым запросом — ждём подольше, а не просто
-  // «появления карточек» (они могут быть уже на странице до поиска, из
-  // блока с популярными/рекомендованными товарами).
-  await page.waitForTimeout(1500);
-  await page.waitForSelector('.product-card__content', { timeout: 8000 }).catch(() => {});
-  await page.waitForTimeout(500);
-
-  const items = await page.evaluate(() => {
-    const cards = Array.from(document.querySelectorAll('.product-card__content'));
-    return cards
-      .map(card => {
-        const nameEl = card.querySelector('.product-card__name');
-        // ".../__current" is the pack price as shown (e.g. "80.00" for
-        // a 0.5кг pack). Deliberately NOT using the "quantum" weight
-        // reference price next to it — that one is per-kg, not the
-        // pack price.
-        const priceEl = card.querySelector('.product-card-price__current');
-        const title = nameEl ? nameEl.textContent.trim() : '';
-        const priceText = priceEl ? priceEl.textContent.replace(/\s/g, '').replace(',', '.') : '';
-        const match = priceText.match(/[\d.]+/);
-        const price = match ? parseFloat(match[0]) : NaN;
-        return { title, price };
-      })
-      .filter(x => x.title && !Number.isNaN(x.price));
-  });
-
-  // Диагностика в лог Action — видно, что реально вернул поиск по запросу.
-  console.log(`  [Командор] запрос "${query}" → найдено ${items.length}: ${items.slice(0, 5).map(i => i.title).join(' | ')}`);
-
-  return items.slice(0, limit);
+  const browser = await chromium.launch();
+  for (const name of names) {
+    console.log(`→ ${name}`);
+    const result = await priceForItem(browser, name);
+    if (result) {
+      await writePrice(priceKey(name), result);
+      console.log(
+        `  saved: ${result.avgPrice} ₽ (n=${result.sampleSize}, sources=${result.sources.join(', ') || 'none'})`
+      );
+    }
+  }
+  await browser.close();
 }
 
-// TODO: needs real selectors — Пятёрочка's anti-bot protection needs a
-// specialised browser (camoufox), not plain Playwright. Left as a stub.
-async function searchPyaterochka(_page, _query, _limit = 5) {
-  return [];
-}
-
-export const STORE_ADAPTERS = [
-  { name: 'Командор', search: searchKomandor },
-];
-// Магнит и Пятёрочка временно отключены (не участвуют в поиске), но
-// функции остались выше — верни нужную сеть в этот список, если
-// захочешь снова её подключить.
+main().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
