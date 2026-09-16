@@ -54,17 +54,19 @@ async function searchKomandor(page, query, limit = 5) {
   await page.goto('https://kopilkago.ru/', { waitUntil: 'domcontentloaded', timeout: 20000 });
 
   const input = await page.waitForSelector('.header-search__input', { timeout: 10000 }).catch(() => null);
-  if (!input) {
-    console.warn('  [Командор] поле поиска не найдено (.header-search__input) — верстка страницы могла измениться');
-    return [];
-  }
+  if (!input) return [];
 
   await input.click();
-  // Печать по буквам иногда обрезала первое слово в многословных запросах
-  // (похоже, сайт что-то переигрывает в поле по ходу ввода). Раз мы всё
-  // равно жмём отдельную кнопку поиска — надёжнее сразу подставить
-  // готовое значение целиком.
+  // Печать по буквам иногда обрезала первое слово в многословных запросах,
+  // а простой fill() сайт не замечает (не видит события, на которые
+  // реагирует его JS). Комбинируем: ставим значение целиком, а потом
+  // вручную дёргаем input/keyup — то, на что реагирует их поиск.
   await input.fill(query);
+  await input.evaluate((el) => {
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  });
   const actualValue = await input.inputValue().catch(() => '');
   if (actualValue !== query) {
     console.warn(`  [Командор] поле поиска показывает "${actualValue}", а не "${query}" — возможно, промах`);
@@ -72,51 +74,20 @@ async function searchKomandor(page, query, limit = 5) {
 
   // Ввод текста сам по себе НЕ запускает поиск на этом сайте — нужно
   // явно нажать на кнопку-лупу рядом с полем.
-  const urlBefore = page.url();
   const submitBtn = await page.waitForSelector('.header-search__submit', { timeout: 5000 }).catch(() => null);
-  if (!submitBtn) {
-    console.warn('  [Командор] кнопка поиска не найдена (.header-search__submit) — поиск не запущен');
-    return [];
-  }
-  await submitBtn.click();
+  if (submitBtn) await submitBtn.click();
 
   // Индикатор загрузки для коротких запросов появляется и исчезает
   // слишком быстро, чтобы его поймать — вместо гонки за ним просто ждём
   // фиксированную паузу, достаточную для сетевого запроса и рендера.
   await page.waitForTimeout(1800);
-  const resultsList = await page
-    .waitForSelector('.header-search-result-products__list', { timeout: 8000 })
-    .catch(() => null);
+  await page.waitForSelector('.header-search-result-products__list', { timeout: 8000 }).catch(() => {});
   await page.waitForTimeout(400);
 
-  const urlAfter = page.url();
-  if (urlAfter !== urlBefore) {
-    console.warn(`  [Командор] после клика по поиску адрес страницы изменился: ${urlBefore} → ${urlAfter}`);
-  }
-
-  if (!resultsList) {
-    // Раньше здесь был фолбэк "|| document", который в случае ненайденного
-    // блока результатов скрейпил ВСЮ страницу (включая рекомендации на
-    // главной) и возвращал одни и те же карточки независимо от запроса —
-    // именно это давало одинаковую цену для любого товара. Теперь вместо
-    // этого честно возвращаем пусто и оставляем диагностику в логе, чтобы
-    // понять настоящую причину и поправить селектор осознанно, а не вслепую.
-    const debug = await page
-      .evaluate(() => ({
-        productCardLikeCount: document.querySelectorAll('[class*="product-card"]').length,
-        pageTitle: document.title,
-        bodyTextLength: document.body ? document.body.innerText.length : 0,
-      }))
-      .catch(() => null);
-    console.warn(
-      `  [Командор] блок результатов поиска не найден (.header-search-result-products__list). Диагностика: ${JSON.stringify(debug)}`
-    );
-    return [];
-  }
-
-  const items = await page.evaluate((scopeSelector) => {
-    const scope = document.querySelector(scopeSelector);
-    if (!scope) return [];
+  const items = await page.evaluate(() => {
+    // Строго внутри панели результатов поиска, а не по всей странице —
+    // иначе попадают карточки из обычного каталога на главной.
+    const scope = document.querySelector('.header-search-result-products__list') || document;
     const cards = Array.from(scope.querySelectorAll('.product-card__content'));
     return cards
       .map(card => {
@@ -133,7 +104,7 @@ async function searchKomandor(page, query, limit = 5) {
         return { title, price };
       })
       .filter(x => x.title && !Number.isNaN(x.price));
-  }, '.header-search-result-products__list');
+  });
 
   // Диагностика в лог Action — видно, что реально вернул поиск по запросу.
   console.log(`  [Командор] запрос "${query}" → найдено ${items.length}: ${items.slice(0, 5).map(i => i.title).join(' | ')}`);
