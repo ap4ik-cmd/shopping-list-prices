@@ -1,86 +1,126 @@
-// scripts/store-adapters.mjs — адаптер для Командор (kopilkago.ru)
+// store-adapters.mjs
+//
+// Each adapter searches one store's site for a product name and returns
+// up to `limit` matches as { title, price }. `price` must be the PACK /
+// UNIT price shown on the site — not recalculated per kg. Items that are
+// genuinely sold loose by weight (fruit, veg, some meat) will naturally
+// come back with a per-kg price from the store itself, which is fine —
+// that IS the real unit price for that product.
+//
+// Магнит and Командор are verified against real markup (checked with
+// the user directly). Пятёрочка is left as a stub — its anti-bot
+// protection needs a specialised browser (camoufox), not plain
+// Playwright.
 
-const KOMANDOR_URL = 'https://kopilkago.ru/';
-const SEARCH_INPUT_SELECTOR = '.header-search__input';
-const RESULTS_LIST_SELECTOR = '.header-search-result-products__list';
-const RESULT_ITEM_SELECTOR = `${RESULTS_LIST_SELECTOR} > div > .product-card`;
+async function searchMagnit(page, query, limit = 5) {
+  const url = `https://magnit.ru/search?term=${encodeURIComponent(query)}`;
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
 
-const RESULTS_TIMEOUT_MS = 8000;
-const TYPE_DELAY_MS = 60; // имитация набора, живой поиск обычно debounce ~300-500ms
+  // Magnit may show an address/city picker on first visit — try to
+  // dismiss it if it's blocking the results (best-effort, harmless if
+  // there's nothing to dismiss).
+  await page.keyboard.press('Escape').catch(() => {});
 
-/**
- * Парсит цену вида "129.99" -> число. Возвращает null, если не нашли.
- */
-function parsePrice(text) {
-  if (!text) return null;
-  const cleaned = text.replace(/\s/g, '').replace(',', '.');
-  const value = parseFloat(cleaned);
-  return Number.isFinite(value) ? value : null;
+  await page
+    .waitForSelector('.unit-catalog-product-preview-description', { timeout: 12000 })
+    .catch(() => {});
+
+  const items = await page.evaluate(() => {
+    const cards = Array.from(document.querySelectorAll('.unit-catalog-product-preview-description'));
+    return cards
+      .map(card => {
+        const titleEl = card.querySelector('.unit-catalog-product-preview-title');
+        // ".../__regular" is the pack price as shown (e.g. "223.98 ₽").
+        // Deliberately NOT using ".../-weighted" — that one is the
+        // per-kg reference price (e.g. "159.99 ₽ · 1кг"), not the pack price.
+        const priceEl = card.querySelector('.unit-catalog-product-preview-prices__regular');
+        const title = titleEl ? titleEl.textContent.trim() : '';
+        const priceText = priceEl ? priceEl.textContent.replace(/\s/g, '').replace(',', '.') : '';
+        const match = priceText.match(/[\d.]+/);
+        const price = match ? parseFloat(match[0]) : NaN;
+        return { title, price };
+      })
+      .filter(x => x.title && !Number.isNaN(x.price));
+  });
+
+  return items.slice(0, limit);
 }
 
-/**
- * Ищет товар на kopilkago.ru (Командор) и возвращает цену первого результата.
- * @param {import('playwright').Page} page
- * @param {string} productName
- * @returns {Promise<{price: number, oldPrice: number|null, name: string} | null>}
- */
-export async function fetchKomandorPrice(page, productName) {
-  await page.goto(KOMANDOR_URL, { waitUntil: 'domcontentloaded' });
+// Командор (kopilkago.ru) doesn't navigate to a separate search-results
+// URL — results appear as a dropdown under the search field while
+// typing. So instead of goto()-ing a search URL, we type into the
+// field on the homepage and read whatever appears.
+async function searchKomandor(page, query, limit = 5) {
+  await page.goto('https://kopilkago.ru/', { waitUntil: 'domcontentloaded', timeout: 20000 });
 
-  const input = page.locator(SEARCH_INPUT_SELECTOR);
-  await input.waitFor({ state: 'visible', timeout: 10000 });
+  const input = await page.waitForSelector('.header-search__input', { timeout: 10000 }).catch(() => null);
+  if (!input) return [];
+
   await input.click();
-  await input.fill(''); // на случай остаточного текста
-
-  // Печатаем посимвольно — живой поиск реагирует на input-события,
-  // а не на programmatic value-set (fill иногда не триггерит debounce).
-  await input.type(productName, { delay: TYPE_DELAY_MS });
-
-  // Ждём именно блок результатов поиска, а не рекомендации внизу страницы.
-  // Рекомендации на странице есть всегда — если ждать просто ".product-card",
-  // промис резолвится мгновенно на первом товаре из рекомендаций (баг, который
-  // мы чинили: одинаковая цена на каждый товар).
-  try {
-    await page.waitForSelector(RESULTS_LIST_SELECTOR, {
-      state: 'visible',
-      timeout: RESULTS_TIMEOUT_MS,
-    });
-  } catch {
-    console.warn(`No search results dropdown appeared for "${productName}"`);
-    return null;
+  // Печать по буквам иногда обрезала первое слово в многословных запросах,
+  // а простой fill() сайт не замечает (не видит события, на которые
+  // реагирует его JS). Комбинируем: ставим значение целиком, а потом
+  // вручную дёргаем input/keyup — то, на что реагирует их поиск.
+  await input.fill(query);
+  await input.evaluate((el) => {
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  const actualValue = await input.inputValue().catch(() => '');
+  if (actualValue !== query) {
+    console.warn(`  [Командор] поле поиска показывает "${actualValue}", а не "${query}" — возможно, промах`);
   }
 
-  // Дополнительно ждём, чтобы внутри блока реально появились карточки
-  // (сам контейнер может отрендериться раньше данных).
-  const items = page.locator(RESULT_ITEM_SELECTOR);
-  try {
-    await items.first().waitFor({ state: 'visible', timeout: RESULTS_TIMEOUT_MS });
-  } catch {
-    console.warn(`No prices found anywhere for "${productName}"`);
-    return null;
-  }
+  // Ввод текста сам по себе НЕ запускает поиск на этом сайте — нужно
+  // явно нажать на кнопку-лупу рядом с полем.
+  const submitBtn = await page.waitForSelector('.header-search__submit', { timeout: 5000 }).catch(() => null);
+  if (submitBtn) await submitBtn.click();
 
-  const firstItem = items.first();
+  // Индикатор загрузки для коротких запросов появляется и исчезает
+  // слишком быстро, чтобы его поймать — вместо гонки за ним просто ждём
+  // фиксированную паузу, достаточную для сетевого запроса и рендера.
+  await page.waitForTimeout(1800);
+  await page.waitForSelector('.header-search-result-products__list', { timeout: 8000 }).catch(() => {});
+  await page.waitForTimeout(400);
 
-  const name = (await firstItem.locator('.product-card__name a').innerText().catch(() => '')).trim();
-  const currentPriceText = await firstItem
-    .locator('.product-card-price__current')
-    .innerText()
-    .catch(() => null);
-  const oldPriceText = await firstItem
-    .locator('.product-card-price__old')
-    .innerText()
-    .catch(() => null);
+  const items = await page.evaluate(() => {
+    // Строго внутри панели результатов поиска, а не по всей странице —
+    // иначе попадают карточки из обычного каталога на главной.
+    const scope = document.querySelector('.header-search-result-products__list') || document;
+    const cards = Array.from(scope.querySelectorAll('.product-card__content'));
+    return cards
+      .map(card => {
+        const nameEl = card.querySelector('.product-card__name');
+        // ".../__current" is the pack price as shown (e.g. "80.00" for
+        // a 0.5кг pack). Deliberately NOT using the "quantum" weight
+        // reference price next to it — that one is per-kg, not the
+        // pack price.
+        const priceEl = card.querySelector('.product-card-price__current');
+        const title = nameEl ? nameEl.textContent.trim() : '';
+        const priceText = priceEl ? priceEl.textContent.replace(/\s/g, '').replace(',', '.') : '';
+        const match = priceText.match(/[\d.]+/);
+        const price = match ? parseFloat(match[0]) : NaN;
+        return { title, price };
+      })
+      .filter(x => x.title && !Number.isNaN(x.price));
+  });
 
-  const price = parsePrice(currentPriceText);
-  if (price === null) {
-    console.warn(`Found result for "${productName}" but couldn't parse price: "${currentPriceText}"`);
-    return null;
-  }
+  // Диагностика в лог Action — видно, что реально вернул поиск по запросу.
+  console.log(`  [Командор] запрос "${query}" → найдено ${items.length}: ${items.slice(0, 5).map(i => i.title).join(' | ')}`);
 
-  return {
-    price,
-    oldPrice: parsePrice(oldPriceText),
-    name,
-  };
+  return items.slice(0, limit);
 }
+
+// TODO: needs real selectors — Пятёрочка's anti-bot protection needs a
+// specialised browser (camoufox), not plain Playwright. Left as a stub.
+async function searchPyaterochka(_page, _query, _limit = 5) {
+  return [];
+}
+
+export const STORE_ADAPTERS = [
+  { name: 'Командор', search: searchKomandor },
+];
+// Магнит и Пятёрочка временно отключены (не участвуют в поиске), но
+// функции остались выше — верни нужную сеть в этот список, если
+// захочешь снова её подключить.
