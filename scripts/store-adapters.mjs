@@ -57,18 +57,25 @@ async function searchKomandor(page, query, limit = 5) {
   if (!input) return [];
 
   await input.click();
-  await input.type(query, { delay: 90 });
+  // Печать по буквам иногда обрезала первое слово в многословных запросах
+  // (похоже, сайт что-то переигрывает в поле по ходу ввода). Раз мы всё
+  // равно жмём отдельную кнопку поиска — надёжнее сразу подставить
+  // готовое значение целиком.
+  await input.fill(query);
+  const actualValue = await input.inputValue().catch(() => '');
+  if (actualValue !== query) {
+    console.warn(`  [Командор] поле поиска показывает "${actualValue}", а не "${query}" — возможно, промах`);
+  }
 
   // Ввод текста сам по себе НЕ запускает поиск на этом сайте — нужно
   // явно нажать на кнопку-лупу рядом с полем.
   const submitBtn = await page.waitForSelector('.header-search__submit', { timeout: 5000 }).catch(() => null);
   if (submitBtn) await submitBtn.click();
 
-  // Ждём, пока сработает индикатор загрузки и появится сама панель
-  // результатов (не просто любую карточку товара — они есть и в общем
-  // каталоге на странице, а нам нужны именно результаты поиска).
-  await page.waitForSelector('.header-search__loader', { state: 'visible', timeout: 3000 }).catch(() => {});
-  await page.waitForSelector('.header-search__loader', { state: 'hidden', timeout: 8000 }).catch(() => {});
+  // Индикатор загрузки для коротких запросов появляется и исчезает
+  // слишком быстро, чтобы его поймать — вместо гонки за ним просто ждём
+  // фиксированную паузу, достаточную для сетевого запроса и рендера.
+  await page.waitForTimeout(1800);
   await page.waitForSelector('.header-search-result-products__list', { timeout: 8000 }).catch(() => {});
   await page.waitForTimeout(400);
 
