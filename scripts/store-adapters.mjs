@@ -59,12 +59,16 @@ async function searchKomandor(page, query, limit = 5) {
   await input.click();
   await input.type(query, { delay: 90 });
 
-  // Сайт ищет с debounce + сетевым запросом — ждём подольше, а не просто
-  // «появления карточек» (они могут быть уже на странице до поиска, из
-  // блока с популярными/рекомендованными товарами).
-  await page.waitForTimeout(1500);
+  // Ввод текста сам по себе НЕ запускает поиск на этом сайте — нужно
+  // явно нажать на кнопку-лупу рядом с полем.
+  const submitBtn = await page.waitForSelector('.header-search__submit', { timeout: 5000 }).catch(() => null);
+  if (submitBtn) await submitBtn.click();
+
+  // Ждём, пока сработает индикатор загрузки и подгрузятся результаты.
+  await page.waitForSelector('.header-search__loader', { state: 'visible', timeout: 3000 }).catch(() => {});
+  await page.waitForSelector('.header-search__loader', { state: 'hidden', timeout: 8000 }).catch(() => {});
   await page.waitForSelector('.product-card__content', { timeout: 8000 }).catch(() => {});
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(400);
 
   const items = await page.evaluate(() => {
     const cards = Array.from(document.querySelectorAll('.product-card__content'));
