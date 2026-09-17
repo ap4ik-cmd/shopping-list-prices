@@ -46,94 +46,60 @@ async function searchMagnit(page, query, limit = 5) {
   return items.slice(0, limit);
 }
 
-// Командор (kopilkago.ru) doesn't navigate to a separate search-results
-// URL — results appear as a dropdown under the search field while
-// typing. So instead of goto()-ing a search URL, we type into the
-// field on the homepage and read whatever appears.
+// Командор (kopilkago.ru): живой поиск по мере ввода, результаты
+// появляются прямо под полем поиска. ВАЖНО: до всякого ввода (и сразу
+// после клика в поле) там уже показываются "рекомендованные товары" в
+// точно такой же вёрстке — если это не учитывать, можно принять их за
+// результаты поиска. Поэтому явно ждём, пока список ИЗМЕНИТСЯ по
+// сравнению с тем, что было до ввода, а не просто ждём паузу.
+function readKomandorCards() {
+  const scope = document.querySelector('.header-search-result-products__list') || document;
+  const cards = Array.from(scope.querySelectorAll('.product-card__content'));
+  return cards
+    .map(card => {
+      const nameEl = card.querySelector('.product-card__name');
+      const priceEl = card.querySelector('.product-card-price__current');
+      const title = nameEl ? nameEl.textContent.trim() : '';
+      const priceText = priceEl ? priceEl.textContent.replace(/\s/g, '').replace(',', '.') : '';
+      const match = priceText.match(/[\d.]+/);
+      const price = match ? parseFloat(match[0]) : NaN;
+      return { title, price };
+    })
+    .filter(x => x.title && !Number.isNaN(x.price));
+}
+
 async function searchKomandor(page, query, limit = 5) {
   await page.goto('https://kopilkago.ru/', { waitUntil: 'domcontentloaded', timeout: 20000 });
 
   const input = await page.waitForSelector('.header-search__input', { timeout: 10000 }).catch(() => null);
-  if (!input) {
-    console.warn('  [Командор] поле поиска не найдено (.header-search__input) — верстка страницы могла измениться');
-    return [];
-  }
+  if (!input) return [];
 
   await input.click();
-  // Печать по буквам иногда обрезала первое слово в многословных запросах
-  // (похоже, сайт что-то переигрывает в поле по ходу ввода). Раз мы всё
-  // равно жмём отдельную кнопку поиска — надёжнее сразу подставить
-  // готовое значение целиком.
-  await input.fill(query);
+  // Снимок того, что показывается ДО ввода (обычно это рекомендованные
+  // товары, не результаты поиска) — по нему поймём, когда список реально
+  // обновится.
+  await page.waitForTimeout(500);
+  const beforeItems = await page.evaluate(readKomandorCards);
+  const beforeSignature = beforeItems.map(i => i.title).join('|');
+
+  // Печатаем по буквам — это живой поиск, и именно так реагирует их JS
+  // (просто подставленное значение через fill() сайт не замечает).
+  await input.type(query, { delay: 80 });
+
   const actualValue = await input.inputValue().catch(() => '');
   if (actualValue !== query) {
     console.warn(`  [Командор] поле поиска показывает "${actualValue}", а не "${query}" — возможно, промах`);
   }
 
-  // Ввод текста сам по себе НЕ запускает поиск на этом сайте — нужно
-  // явно нажать на кнопку-лупу рядом с полем.
-  const urlBefore = page.url();
-  const submitBtn = await page.waitForSelector('.header-search__submit', { timeout: 5000 }).catch(() => null);
-  if (!submitBtn) {
-    console.warn('  [Командор] кнопка поиска не найдена (.header-search__submit) — поиск не запущен');
-    return [];
+  // Ждём, пока список результатов реально изменится (не просто фиксированную
+  // паузу) — до ~4 секунд, проверяя каждые 300мс.
+  let items = [];
+  for (let i = 0; i < 13; i++) {
+    await page.waitForTimeout(300);
+    items = await page.evaluate(readKomandorCards);
+    const signature = items.map(x => x.title).join('|');
+    if (signature && signature !== beforeSignature) break;
   }
-  await submitBtn.click();
-
-  // Индикатор загрузки для коротких запросов появляется и исчезает
-  // слишком быстро, чтобы его поймать — вместо гонки за ним просто ждём
-  // фиксированную паузу, достаточную для сетевого запроса и рендера.
-  await page.waitForTimeout(1800);
-  const resultsList = await page
-    .waitForSelector('.header-search-result-products__list', { timeout: 8000 })
-    .catch(() => null);
-  await page.waitForTimeout(400);
-
-  const urlAfter = page.url();
-  if (urlAfter !== urlBefore) {
-    console.warn(`  [Командор] после клика по поиску адрес страницы изменился: ${urlBefore} → ${urlAfter}`);
-  }
-
-  if (!resultsList) {
-    // Раньше здесь был фолбэк "|| document", который в случае ненайденного
-    // блока результатов скрейпил ВСЮ страницу (включая рекомендации на
-    // главной) и возвращал одни и те же карточки независимо от запроса —
-    // именно это давало одинаковую цену для любого товара. Теперь вместо
-    // этого честно возвращаем пусто и оставляем диагностику в логе, чтобы
-    // понять настоящую причину и поправить селектор осознанно, а не вслепую.
-    const debug = await page
-      .evaluate(() => ({
-        productCardLikeCount: document.querySelectorAll('[class*="product-card"]').length,
-        pageTitle: document.title,
-        bodyTextLength: document.body ? document.body.innerText.length : 0,
-      }))
-      .catch(() => null);
-    console.warn(
-      `  [Командор] блок результатов поиска не найден (.header-search-result-products__list). Диагностика: ${JSON.stringify(debug)}`
-    );
-    return [];
-  }
-
-  const items = await page.evaluate((scopeSelector) => {
-    const scope = document.querySelector(scopeSelector);
-    if (!scope) return [];
-    const cards = Array.from(scope.querySelectorAll('.product-card__content'));
-    return cards
-      .map(card => {
-        const nameEl = card.querySelector('.product-card__name');
-        // ".../__current" is the pack price as shown (e.g. "80.00" for
-        // a 0.5кг pack). Deliberately NOT using the "quantum" weight
-        // reference price next to it — that one is per-kg, not the
-        // pack price.
-        const priceEl = card.querySelector('.product-card-price__current');
-        const title = nameEl ? nameEl.textContent.trim() : '';
-        const priceText = priceEl ? priceEl.textContent.replace(/\s/g, '').replace(',', '.') : '';
-        const match = priceText.match(/[\d.]+/);
-        const price = match ? parseFloat(match[0]) : NaN;
-        return { title, price };
-      })
-      .filter(x => x.title && !Number.isNaN(x.price));
-  }, '.header-search-result-products__list');
 
   // Диагностика в лог Action — видно, что реально вернул поиск по запросу.
   console.log(`  [Командор] запрос "${query}" → найдено ${items.length}: ${items.slice(0, 5).map(i => i.title).join(' | ')}`);
@@ -148,8 +114,8 @@ async function searchPyaterochka(_page, _query, _limit = 5) {
 }
 
 export const STORE_ADAPTERS = [
-  { name: 'Командор', search: searchKomandor },
+  { name: 'Магнит', search: searchMagnit },
 ];
-// Магнит и Пятёрочка временно отключены (не участвуют в поиске), но
+// Командор и Пятёрочка временно отключены (не участвуют в поиске), но
 // функции остались выше — верни нужную сеть в этот список, если
 // захочешь снова её подключить.
