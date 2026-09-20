@@ -117,6 +117,18 @@ async function writePrice(key, data) {
     body: JSON.stringify(data),
   });
   if (!res.ok) throw new Error(`PUT prices/${key} -> ${res.status}`);
+
+  // Отдельно копим историю цен для графика — сюда просто дописываем
+  // новую точку, ничего не перезаписывая.
+  try {
+    await fetch(`${FIREBASE_URL}/priceHistory/${key}.json`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ avgPrice: data.avgPrice, date: data.updatedAt }),
+    });
+  } catch (e) {
+    console.warn(`  Не удалось записать историю цены для ${key}: ${e.message}`);
+  }
 }
 
 async function main() {
