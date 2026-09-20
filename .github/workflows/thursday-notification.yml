@@ -1,0 +1,24 @@
+name: Thursday shopping reminder
+
+on:
+  schedule:
+    - cron: '0 7 * * 4'   # четверг, 07:00 UTC = 14:00 по Красноярску (UTC+7)
+  workflow_dispatch: {}    # можно запустить вручную для проверки
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install dependencies
+        working-directory: scripts
+        run: npm install
+      - name: Send notification
+        working-directory: scripts
+        env:
+          VAPID_PUBLIC_KEY: ${{ secrets.VAPID_PUBLIC_KEY }}
+          VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
+        run: node send-notification.mjs
