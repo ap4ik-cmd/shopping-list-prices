@@ -28,8 +28,8 @@ async function main() {
   }
 
   const payload = JSON.stringify({
-    title: 'Food Listing',
-    body: 'Пора закупаться! 🛒 Проверьте список покупок.',
+    title: 'Четверг — день закупок 🛒',
+    body: 'Пора закупаться! Проверьте список покупок.',
   });
 
   const entries = Object.entries(raw);
